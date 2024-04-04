@@ -52,6 +52,19 @@ def pytest_collection_modifyitems(config, items):
             if marker in item.keywords:
                 item.add_marker(custom_markers[marker])
 
+    # Normalize the file paths and use a consistent comparison method
+    normalized_path = lambda p: os.path.normpath(str(p))
+    resource_allocation_path = normalized_path("tests/unittests/resource_allocation")
+
+    # Reordering logic to ensure tests under ./unittests/resource_allocation run last
+    # TODO: Fix this once resource_allocation tests are robost enough to run with other tests without ordering issues
+    resource_allocation_tests = [item for item in items if resource_allocation_path in normalized_path(item.fspath)]
+    other_tests = [item for item in items if resource_allocation_path not in normalized_path(item.fspath)]
+
+    items.clear()
+    items.extend(other_tests)
+    items.extend(resource_allocation_tests)
+
 
 class DatasetLoaderHelper:
     dataset_info_dict = dict(
