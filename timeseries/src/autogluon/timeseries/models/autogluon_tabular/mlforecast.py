@@ -242,7 +242,7 @@ class AbstractMLForecastModel(AbstractTimeSeriesModel):
         Each row contains unique_id, ds, y, and (optionally) known covariates & static features.
         """
         # TODO: Add support for past_covariates
-        selected_columns = self.metadata.known_covariates_real.copy()
+        selected_columns = self.metadata.known_covariates.copy()
         column_name_mapping = {ITEMID: MLF_ITEMID, TIMESTAMP: MLF_TIMESTAMP}
         if include_target:
             selected_columns += [self.target]
@@ -425,6 +425,9 @@ class DirectTabularModel(AbstractMLForecastModel):
         end of each time series).
     """
 
+    supports_known_covariates = True
+    supports_static_features = True
+
     @property
     def is_quantile_model(self) -> bool:
         return self.eval_metric.needs_quantile
@@ -575,6 +578,9 @@ class RecursiveTabularModel(AbstractMLForecastModel):
         If not None, training dataset passed to TabularPredictor will contain at most this many rows (starting from the
         end of each time series).
     """
+
+    supports_known_covariates = True
+    supports_static_features = True
 
     def _get_model_params(self) -> dict:
         model_params = super()._get_model_params()

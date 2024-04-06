@@ -70,8 +70,6 @@ logger = logging.getLogger(__name__)  # return autogluon root logger
 # Extra TODOs (Stretch): Can occur post v1.0
 # TODO: make core_kwargs a kwargs argument to predictor.fit
 # TODO: add aux_kwargs to predictor.fit
-# TODO: add pip freeze + python version output after fit + log file, validate that same pip freeze on load as cached
-# TODO: Add logging comments that models are serialized on disk after fit
 # TODO: consider adding kwarg option for data which has already been preprocessed by feature generator to skip feature generation.
 # TODO: Resolve raw text feature usage in default feature generator
 # TODO: num_bag_sets -> ag_args
@@ -3364,7 +3362,8 @@ class TabularPredictor(TabularPredictorDeprecatedMixin):
         )
 
         if refit_full:
-            models += self.refit_full(model=models)
+            refit_models_dict = self.refit_full(model=models)
+            models += [refit_models_dict[m] for m in models]
 
         return models
 

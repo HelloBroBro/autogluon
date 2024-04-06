@@ -2,6 +2,7 @@ from pathlib import Path
 from unittest import mock
 
 import numpy as np
+import pandas as pd
 import pytest
 from gluonts.model.predictor import Predictor as GluonTSPredictor
 
@@ -16,6 +17,7 @@ from autogluon.timeseries.models.gluonts import (
 from autogluon.timeseries.utils.features import TimeSeriesFeatureGenerator
 
 from ..common import DATAFRAME_WITH_COVARIATES, DATAFRAME_WITH_STATIC, DUMMY_TS_DATAFRAME
+from ..test_features import get_data_frame_with_covariates
 
 MODELS_WITH_STATIC_FEATURES = [DeepARModel, TemporalFusionTransformerModel, WaveNetModel]
 MODELS_WITH_KNOWN_COVARIATES = [DeepARModel, TemporalFusionTransformerModel, WaveNetModel]
@@ -129,8 +131,8 @@ def test_when_static_features_present_then_they_are_passed_to_dataset(model_clas
             call_kwargs = patch_dataset.call_args[1]
             feat_static_cat = call_kwargs["feat_static_cat"]
             feat_static_real = call_kwargs["feat_static_real"]
-            assert (feat_static_cat.dtypes == "category").all()
-            assert (feat_static_real.dtypes == "float32").all()
+            assert feat_static_cat.dtype == "int64"
+            assert feat_static_real.dtype == "float32"
 
 
 @pytest.mark.parametrize("model_class", MODELS_WITH_STATIC_FEATURES)
@@ -197,7 +199,7 @@ def test_when_known_covariates_present_then_they_are_passed_to_dataset(model_cla
         finally:
             call_kwargs = patch_dataset.call_args[1]
             feat_dynamic_real = call_kwargs["feat_dynamic_real"]
-            assert (feat_dynamic_real.dtypes == "float32").all()
+            assert feat_dynamic_real.dtype == "float32"
 
 
 @pytest.mark.parametrize("model_class", MODELS_WITH_KNOWN_COVARIATES)
@@ -212,14 +214,20 @@ def test_when_known_covariates_present_then_model_attributes_set_correctly(model
 def test_when_known_covariates_present_for_predict_then_covariates_have_correct_shape(model_class, df_with_covariates):
     df, metadata = df_with_covariates
     prediction_length = 5
-    past_data, known_covariates = df.get_model_inputs_for_scoring(prediction_length, metadata.known_covariates_real)
+    past_data, known_covariates = df.get_model_inputs_for_scoring(prediction_length, metadata.known_covariates)
     model = model_class(
         hyperparameters=DUMMY_HYPERPARAMETERS, metadata=metadata, freq=df.freq, prediction_length=prediction_length
     )
     model.fit(train_data=past_data)
     for ts in model._to_gluonts_dataset(past_data, known_covariates=known_covariates):
         expected_length = len(ts["target"]) + prediction_length
-        assert ts["feat_dynamic_real"].shape == (len(metadata.known_covariates_real), expected_length)
+        if model.supports_cat_covariates:
+            assert ts["feat_dynamic_cat"].shape == (len(metadata.known_covariates_cat), expected_length)
+            assert ts["feat_dynamic_real"].shape == (len(metadata.known_covariates_real), expected_length)
+        else:
+            num_onehot_columns = past_data[metadata.known_covariates_cat].nunique().sum()
+            expected_num_feat_dynamic_real = len(metadata.known_covariates_real) + num_onehot_columns
+            assert ts["feat_dynamic_real"].shape == (expected_num_feat_dynamic_real, expected_length)
 
 
 @pytest.mark.parametrize("model_class", MODELS_WITH_KNOWN_COVARIATES)
@@ -237,8 +245,8 @@ def test_when_disable_known_covariates_set_to_true_then_known_covariates_are_not
             pass
         finally:
             call_kwargs = patch_dataset.call_args[1]
-            feat_dynamic_real = call_kwargs["feat_dynamic_real"]
-            assert feat_dynamic_real is None
+            assert call_kwargs["feat_dynamic_real"] is None
+            assert call_kwargs["feat_dynamic_cat"] is None
 
 
 @pytest.mark.parametrize("model_class", MODELS_WITH_STATIC_FEATURES_AND_KNOWN_COVARIATES)
@@ -329,3 +337,58 @@ def test_when_keep_lightning_logs_set_then_logs_are_not_removed(keep_lightning_l
     )
     model.fit(train_data=DUMMY_TS_DATAFRAME)
     assert (Path(model.path) / "lightning_logs").exists() == keep_lightning_logs
+
+
+@pytest.mark.parametrize("model_class", TESTABLE_MODELS)
+@pytest.mark.parametrize("known_covariates_real", [["known_real_1", "known_real_2"], []])
+@pytest.mark.parametrize("past_covariates_real", [["past_real_1"], []])
+@pytest.mark.parametrize("static_features_real", [["static_real_1", "static_real_2"], []])
+def test_given_features_present_when_model_is_fit_then_feature_transformer_is_present(
+    model_class, temp_model_path, known_covariates_real, past_covariates_real, static_features_real
+):
+    known_covariates_names = known_covariates_real + ["known_cat_1"]
+    feat_generator = TimeSeriesFeatureGenerator(target="target", known_covariates_names=known_covariates_names)
+    data = get_data_frame_with_covariates(
+        covariates_cat=["known_cat_1"],
+        covariates_real=known_covariates_real + past_covariates_real,
+        static_features_real=static_features_real,
+        static_features_cat=["static_cat_1"],
+    )
+    data = feat_generator.fit_transform(data)
+    model = model_class(
+        freq=data.freq,
+        hyperparameters=DUMMY_HYPERPARAMETERS,
+        path=temp_model_path,
+        metadata=feat_generator.covariate_metadata,
+    )
+    model.fit(train_data=data, val_data=data)
+    if len(known_covariates_real) > 0 and model.supports_known_covariates:
+        assert len(model._real_column_transformers["known"].feature_names_in_) > 0
+    else:
+        assert "known" not in model._real_column_transformers
+
+    if len(past_covariates_real) > 0 and model.supports_past_covariates:
+        assert len(model._real_column_transformers["past"].feature_names_in_) > 0
+    else:
+        assert "past" not in model._real_column_transformers
+
+    if len(static_features_real) > 0 and model.supports_static_features:
+        assert len(model._real_column_transformers["static"].feature_names_in_) > 0
+    else:
+        assert "static" not in model._real_column_transformers
+
+
+def test_when_covariates_are_preprocessed_then_correct_transform_type_is_used():
+    model = TemporalFusionTransformerModel()
+    N = 500
+    df = pd.DataFrame(
+        {
+            "bool": np.random.choice([0, 1], size=N).astype(float),
+            "skewed": np.random.exponential(size=N),
+            "normal": np.random.normal(size=N),
+        }
+    )
+    pipeline = model._get_transformer_for_columns(df, df.columns)
+    normal_pipeline, skewed_pipeline = pipeline.transformers
+    assert normal_pipeline[-1] == ["normal"]
+    assert skewed_pipeline[-1] == ["skewed"]
