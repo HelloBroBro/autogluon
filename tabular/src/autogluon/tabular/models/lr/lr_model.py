@@ -43,7 +43,12 @@ class LinearModel(AbstractModel):
 
     def _get_model_type(self):
         penalty = self.params.get("penalty", "L2")
-        if self.params_aux.get("use_daal", True):
+        # FIXME: False by default because AdultIncome dataset shows worse results with use_daal=True.
+        #  Version: scikit-learn-intelex-2024.4.0
+        #                     model  score_test  score_val eval_metric
+        #  0            LinearModel    0.902293   0.904318     roc_auc
+        #  1  LinearModel_SKLEARNEX    0.863535   0.873544     roc_auc
+        if self.params_aux.get("use_daal", False):
             # Appears to give 20x training speedup when enabled
             try:
                 from sklearnex.linear_model import Lasso, LogisticRegression, Ridge
@@ -292,3 +297,7 @@ class LinearModel(AbstractModel):
         )
         default_auxiliary_params.update(extra_auxiliary_params)
         return default_auxiliary_params
+
+    def _more_tags(self):
+        # `can_refit_full=True` because validation data isn't used during fit.
+        return {"can_refit_full": True}
