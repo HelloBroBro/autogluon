@@ -14,10 +14,15 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import networkx as nx
 import numpy as np
 import pandas as pd
+from packaging import version
 
 from autogluon.common.loaders import load_json
 from autogluon.common.savers import save_json
 from autogluon.common.utils.file_utils import get_directory_size, get_directory_size_per_file
+from autogluon.common.utils.hyperparameter_utils import (
+    get_hyperparameter_str_deprecation_msg,
+    is_advanced_hyperparameter_format,
+)
 from autogluon.common.utils.log_utils import add_log_to_file, set_logger_verbosity
 from autogluon.common.utils.pandas_utils import get_approximate_df_mem_usage
 from autogluon.common.utils.system_info import get_ag_system_info
@@ -63,6 +68,7 @@ from ..configs.hyperparameter_configs import get_hyperparameter_config
 from ..configs.presets_configs import tabular_presets_alias, tabular_presets_dict
 from ..learner import AbstractTabularLearner, DefaultLearner
 from ..trainer.model_presets.presets import MODEL_TYPES
+from ..version import __version__
 from ._deprecated_methods import TabularPredictorDeprecatedMixin
 
 logger = logging.getLogger(__name__)  # return autogluon root logger
@@ -515,8 +521,6 @@ class TabularPredictor(TabularPredictorDeprecatedMixin):
                 Caution: Any provided search spaces will error if `hyperparameter_tune_kwargs=None` (Default).
                 To train multiple models of a given type, set the value to a list of hyperparameter dictionaries.
                     For example, `hyperparameters = {'RF': [{'criterion': 'gini'}, {'criterion': 'entropy'}]}` will result in 2 random forest models being trained with separate hyperparameters.
-                Some model types have preset hyperparameter configs keyed under strings as shorthand for a complex model hyperparameter configuration known to work well:
-                    'GBM': ['GBMLarge']
             Advanced functionality: Bring your own model / Custom model support
                 AutoGluon fully supports custom models. For a detailed tutorial on creating and using custom models with AutoGluon, refer to https://auto.gluon.ai/stable/tutorials/tabular/advanced/tabular-custom-model.html
             Advanced functionality: Custom stack levels
@@ -532,7 +536,13 @@ class TabularPredictor(TabularPredictorDeprecatedMixin):
                     'GBM': [
                         {'extra_trees': True, 'ag_args': {'name_suffix': 'XT'}},
                         {},
-                        'GBMLarge',
+                        {
+                            "learning_rate": 0.03,
+                            "num_leaves": 128,
+                            "feature_fraction": 0.9,
+                            "min_data_in_leaf": 3,
+                            "ag_args": {"name_suffix": "Large", "priority": 0, "hyperparameter_tune_kwargs": None},
+                        },
                     ],
                     'CAT': {},
                     'XGB': {},
@@ -989,6 +999,8 @@ class TabularPredictor(TabularPredictorDeprecatedMixin):
             logger.log(20, f"{pprint.pformat(kwargs)}")
             logger.log(20, "========================================")
 
+        self._validate_num_cpus(num_cpus=num_cpus)
+        self._validate_num_gpus(num_gpus=num_gpus)
         self._validate_calibrate_decision_threshold(calibrate_decision_threshold=calibrate_decision_threshold)
 
         holdout_frac = kwargs["holdout_frac"]
@@ -1021,7 +1033,7 @@ class TabularPredictor(TabularPredictorDeprecatedMixin):
             hyperparameters = "default"
         if isinstance(hyperparameters, str):
             hyperparameters = get_hyperparameter_config(hyperparameters)
-
+        self._validate_hyperparameters(hyperparameters=hyperparameters)
         self.fit_hyperparameters_ = hyperparameters
 
         if "enable_raw_text_features" not in feature_generator_init_kwargs:
@@ -1633,6 +1645,9 @@ class TabularPredictor(TabularPredictorDeprecatedMixin):
             logger.log(20, "Full kwargs:")
             logger.log(20, f"{pprint.pformat(kwargs)}")
             logger.log(20, "========================================")
+
+        self._validate_num_cpus(num_cpus=num_cpus)
+        self._validate_num_gpus(num_gpus=num_gpus)
 
         # TODO: Allow disable aux (default to disabled)
         # TODO: num_bag_sets
@@ -4267,8 +4282,6 @@ class TabularPredictor(TabularPredictorDeprecatedMixin):
         return load_json.load(path=metadata_file_path, verbose=not silent)
 
     def _save_version_file(self, silent: bool = False):
-        from ..version import __version__
-
         version_file_contents = f"{__version__}"
         version_file_path = os.path.join(self.path, self._predictor_version_file_name)
         save_str.save(path=version_file_path, data=version_file_contents, verbose=not silent)
@@ -4529,6 +4542,30 @@ class TabularPredictor(TabularPredictorDeprecatedMixin):
             raise ValueError(
                 f"`calibrate_decision_threshold` must be a value in " f"{valid_calibrate_decision_threshold_options}, but is: {calibrate_decision_threshold}"
             )
+
+    def _validate_num_cpus(self, num_cpus: int | str):
+        if num_cpus is None:
+            raise ValueError(f"`num_cpus` must be an int or 'auto'. Value: {num_cpus}")
+        if isinstance(num_cpus, str):
+            if num_cpus != "auto":
+                raise ValueError(f"`num_cpus` must be an int or 'auto'. Value: {num_cpus}")
+        elif not isinstance(num_cpus, int):
+            raise TypeError(f"`num_cpus` must be an int or 'auto'. Found: {type(num_cpus)} | Value: {num_cpus}")
+        else:
+            if num_cpus < 1:
+                raise ValueError(f"`num_cpus` must be greater than or equal to 1. (num_cpus={num_cpus})")
+
+    def _validate_num_gpus(self, num_gpus: int | float | str):
+        if num_gpus is None:
+            raise ValueError(f"`num_gpus` must be an int, float, or 'auto'. Value: {num_gpus}")
+        if isinstance(num_gpus, str):
+            if num_gpus != "auto":
+                raise ValueError(f"`num_gpus` must be an int, float, or 'auto'. Value: {num_gpus}")
+        elif not isinstance(num_gpus, (int, float)):
+            raise TypeError(f"`num_gpus` must be an int, float, or 'auto'. Found: {type(num_gpus)} | Value: {num_gpus}")
+        else:
+            if num_gpus < 0:
+                raise ValueError(f"`num_gpus` must be greater than or equal to 0. (num_gpus={num_gpus})")
 
     def _fit_extra_kwargs_dict(self) -> dict:
         """
@@ -5017,12 +5054,8 @@ class TabularPredictor(TabularPredictorDeprecatedMixin):
     def _check_if_hyperparameters_handle_text(hyperparameters: dict) -> bool:
         """Check if hyperparameters contain a model that supports raw text features as input"""
         models_in_hyperparameters = set()
-        is_advanced_hyperparameter_type = False
-        for key in hyperparameters:
-            if isinstance(key, int) or key == "default":
-                is_advanced_hyperparameter_type = True
-                break
-        if is_advanced_hyperparameter_type:
+        advanced_hyperparameter_format = is_advanced_hyperparameter_format(hyperparameters=hyperparameters)
+        if advanced_hyperparameter_format:
             for key in hyperparameters:
                 for m in hyperparameters[key]:
                     models_in_hyperparameters.add(m)
@@ -5045,6 +5078,40 @@ class TabularPredictor(TabularPredictorDeprecatedMixin):
             return True
         else:
             return False
+
+    @staticmethod
+    def _validate_hyperparameters(hyperparameters: dict):
+        """
+        Verifies correctness of hyperparameters object.
+        """
+        valid_types = (list, dict)
+
+        def _validate_hyperparameters_util(params: dict):
+            assert isinstance(params, dict), f"`hyperparameters` must be a dict, but found: {type(params)}"
+            for model_type in params:
+                if not isinstance(params[model_type], valid_types):
+                    extra_msg = ""
+                    if isinstance(params[model_type], str) and params[model_type] == "GBMLarge":
+                        if version.parse(__version__) >= version.parse("1.3.0"):
+                            extra_msg = "\n" + get_hyperparameter_str_deprecation_msg()
+                        else:
+                            # Will log a deprecation warning downstream in trainer
+                            continue
+                    raise AssertionError(
+                        f"Hyperparameters are incorrectly formatted, refer to the documentation for examples. "
+                        f"`hyperparameters` key '{model_type}' has an unexpected value type."
+                        f"\n\tvalid types: {valid_types}"
+                        f"\n\tactual type:  {type(params[model_type])}"
+                        f"\n\tactual value: {params[model_type]}"
+                        f"{extra_msg}"
+                    )
+
+        advanced_hyperparameter_format = is_advanced_hyperparameter_format(hyperparameters=hyperparameters)
+        if advanced_hyperparameter_format:
+            for stack_level in hyperparameters:
+                _validate_hyperparameters_util(params=hyperparameters[stack_level])
+        else:
+            _validate_hyperparameters_util(params=hyperparameters)
 
     def _sanitize_pseudo_data(self, pseudo_data: pd.DataFrame, name="pseudo_data") -> Tuple[pd.DataFrame, pd.Series, pd.Series]:
         assert isinstance(pseudo_data, pd.DataFrame)
