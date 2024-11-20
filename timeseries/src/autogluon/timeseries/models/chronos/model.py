@@ -1,7 +1,6 @@
 import logging
 import os
 import shutil
-import time
 from pathlib import Path
 from typing import Any, Dict, Literal, Optional, Union
 
@@ -68,6 +67,7 @@ MODEL_ALIASES = {
     "small": "autogluon/chronos-t5-small",
     "base": "autogluon/chronos-t5-base",
     "large": "autogluon/chronos-t5-large",
+    "bolt-tiny": "autogluon/chronos-bolt-tiny",
     "bolt-mini": "autogluon/chronos-bolt-mini",
     "bolt-small": "autogluon/chronos-bolt-small",
     "bolt-base": "autogluon/chronos-bolt-base",
@@ -113,10 +113,12 @@ class ChronosModel(AbstractTimeSeriesModel):
     batch_size : int, default = 16
         Size of batches used during inference
     num_samples : int, default = 20
-        Number of samples used during inference
+        Number of samples used during inference, only used for the original Chronos models
     device : str, default = None
         Device to use for inference (and fine-tuning, if enabled). If None, model will use the GPU if available.
-        For larger model sizes `small`, `base`, and `large`; inference will fail if no GPU is available.
+        For larger Chronos model sizes ``small``, ``base``, and ``large``; inference will fail if no GPU is available.
+        For Chronos-Bolt models, inference can be done on the CPU. Although fine-tuning the smaller Chronos models
+        (``tiny`` and ``mini``) and all Chronos-Bolt is allowed on the CPU, we recommend using a GPU for faster fine-tuning.
     context_length : int or None, default = None
         The context length to use in the model. Shorter context lengths will decrease model accuracy, but result
         in faster inference. If None, the model will infer context length from the data set length at inference
@@ -140,9 +142,9 @@ class ChronosModel(AbstractTimeSeriesModel):
         If True, the pretrained model will be fine-tuned
     fine_tune_lr: float, default = 0.0001
         The learning rate used for fine-tuning
-    fine_tune_steps : int, default = 5000
+    fine_tune_steps : int, default = 1000
         The number of gradient update steps to fine-tune for
-    fine_tune_batch_size : int, default = 16
+    fine_tune_batch_size : int, default = 32
         The batch size to use for fine-tuning
     fine_tune_shuffle_buffer_size : int, default = 10000
         The size of the shuffle buffer to shuffle the data during fine-tuning. If None, shuffling will
@@ -162,6 +164,7 @@ class ChronosModel(AbstractTimeSeriesModel):
     # default number of samples for prediction
     default_num_samples: int = 20
     default_model_path = "autogluon/chronos-t5-small"
+    default_max_time_limit_ratio = 0.8
     maximum_context_length = 2048
     fine_tuned_ckpt_name: str = "fine-tuned-ckpt"
 
@@ -216,7 +219,6 @@ class ChronosModel(AbstractTimeSeriesModel):
         )
 
         self.model_pipeline: Optional[Any] = None  # of type BaseChronosPipeline
-        self.time_limit: Optional[float] = None
 
     def save(self, path: str = None, verbose: bool = True) -> str:
         pipeline = self.model_pipeline
@@ -234,7 +236,7 @@ class ChronosModel(AbstractTimeSeriesModel):
 
         fine_tune_ckpt_path = Path(model.path) / cls.fine_tuned_ckpt_name
         if fine_tune_ckpt_path.exists():
-            logger.debug(f"Fine-tuned checkpoint exists, setting model_path to {fine_tune_ckpt_path}")
+            logger.debug(f"\tFine-tuned checkpoint exists, setting model_path to {fine_tune_ckpt_path}")
             model.model_path = fine_tune_ckpt_path
 
         return model
@@ -320,8 +322,8 @@ class ChronosModel(AbstractTimeSeriesModel):
         init_args.setdefault("fine_tune", False)
         init_args.setdefault("keep_transformers_logs", False)
         init_args.setdefault("fine_tune_lr", 1e-4)
-        init_args.setdefault("fine_tune_steps", 5000)
-        init_args.setdefault("fine_tune_batch_size", self.default_batch_size)
+        init_args.setdefault("fine_tune_steps", 1000)
+        init_args.setdefault("fine_tune_batch_size", 32)
         init_args.setdefault("eval_during_fine_tune", False)
         init_args.setdefault("fine_tune_eval_max_items", 256)
         init_args.setdefault("fine_tune_shuffle_buffer_size", 10_000)
@@ -399,7 +401,6 @@ class ChronosModel(AbstractTimeSeriesModel):
 
         eval_during_fine_tune = val_data is not None and fine_tune_args["eval_during_fine_tune"]
 
-        start_time = time.monotonic()
         if do_fine_tune:
             context_length = self._get_context_length(train_data)
             # load model pipeline to device memory
@@ -428,7 +429,7 @@ class ChronosModel(AbstractTimeSeriesModel):
 
                 if self.prediction_length != fine_tune_prediction_length:
                     logger.debug(
-                        f"ChronosBolt models can only be fine-tuned with a maximum prediction_length of {model_prediction_length}. "
+                        f"\tChronosBolt models can only be fine-tuned with a maximum prediction_length of {model_prediction_length}. "
                         f"Fine-tuning prediction_length has been changed to {fine_tune_prediction_length}."
                     )
 
@@ -436,10 +437,15 @@ class ChronosModel(AbstractTimeSeriesModel):
             fine_tune_trainer_kwargs["disable_tqdm"] = fine_tune_trainer_kwargs.get("disable_tqdm", (verbosity < 3))
             fine_tune_trainer_kwargs["use_cpu"] = str(self.model_pipeline.inner_model.device) == "cpu"
 
-            # TODO: adamw_torch_fused is not supported on CPU in torch <= 2.3. When torch 2.4 becomes the lower bound
-            # this if block can be removed because torch >= 2.4 supports AdamW optimizer with fused=True on CPU
-            if fine_tune_trainer_kwargs["use_cpu"] and fine_tune_trainer_kwargs["optim"] == "adamw_torch_fused":
-                fine_tune_trainer_kwargs["optim"] = "adamw_torch"
+            if fine_tune_trainer_kwargs["use_cpu"]:
+                logger.info(
+                    "\tFine-tuning on the CPU detected. We recommend using a GPU for faster fine-tuning of Chronos."
+                )
+
+                # TODO: adamw_torch_fused is not supported on CPU in torch <= 2.3. When torch 2.4 becomes the lower bound
+                # this if block can be removed because torch >= 2.4 supports AdamW optimizer with fused=True on CPU
+                if fine_tune_trainer_kwargs["optim"] == "adamw_torch_fused":
+                    fine_tune_trainer_kwargs["optim"] = "adamw_torch"
 
             output_dir = Path(fine_tune_trainer_kwargs["output_dir"])
 
@@ -509,36 +515,15 @@ class ChronosModel(AbstractTimeSeriesModel):
                 )
                 trainer.add_callback(LoggerCallback())
 
-            if val_data is not None:
-                # evaluate once before training
-                zero_shot_eval_loss = trainer.evaluate()["eval_loss"]
-
             trainer.train()
 
-            if eval_during_fine_tune:
-                # get the best eval_loss logged during fine-tuning
-                log_history_df = pd.DataFrame(trainer.state.log_history)
-                best_train_eval_loss = log_history_df["eval_loss"].min()
-            elif val_data is not None:
-                # evaluate at the end of fine-tuning
-                best_train_eval_loss = trainer.evaluate()["eval_loss"]
-
-            if val_data is None or best_train_eval_loss <= zero_shot_eval_loss:
-                fine_tuned_ckpt_path = Path(self.path) / self.fine_tuned_ckpt_name
-                logger.info(f"Saving fine-tuned model to {fine_tuned_ckpt_path}")
-                self.model_pipeline.inner_model.save_pretrained(Path(self.path) / self.fine_tuned_ckpt_name)
-            else:
-                # Reset the model to its pretrained state
-                logger.info("Validation loss worsened after fine-tuning. Reverting to the pretrained model.")
-                self.model_pipeline = None
-                self.load_model_pipeline(is_training=False)
+            fine_tuned_ckpt_path = Path(self.path) / self.fine_tuned_ckpt_name
+            logger.info(f"\tSaving fine-tuned model to {fine_tuned_ckpt_path}")
+            self.model_pipeline.inner_model.save_pretrained(Path(self.path) / self.fine_tuned_ckpt_name)
 
             if not fine_tune_args["keep_transformers_logs"]:
                 logger.debug(f"Removing transformers_logs directory {output_dir}")
                 shutil.rmtree(output_dir)
-
-        if time_limit is not None:
-            self.time_limit = time_limit - (time.monotonic() - start_time)  # inference time budget
 
     def _get_inference_data_loader(
         self,
@@ -635,16 +620,3 @@ class ChronosModel(AbstractTimeSeriesModel):
             "can_use_train_data": do_fine_tune,
             "can_use_val_data": do_fine_tune,
         }
-
-    def score_and_cache_oof(
-        self,
-        val_data: TimeSeriesDataFrame,
-        store_val_score: bool = False,
-        store_predict_time: bool = False,
-        **predict_kwargs,
-    ) -> None:
-        # All computation happens during inference, so we provide the time_limit at prediction time
-        # TODO: Once custom predict_kwargs is allowed, make sure that `time_limit` is not among the keys
-        super().score_and_cache_oof(
-            val_data, store_val_score, store_predict_time, time_limit=self.time_limit, **predict_kwargs
-        )

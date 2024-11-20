@@ -29,7 +29,7 @@ from autogluon.timeseries.utils.features import (
     CovariateMetadata,
     PermutationFeatureImportanceTransform,
 )
-from autogluon.timeseries.utils.warning_filters import disable_tqdm
+from autogluon.timeseries.utils.warning_filters import disable_tqdm, warning_filter
 
 logger = logging.getLogger("autogluon.timeseries.trainer")
 
@@ -264,6 +264,7 @@ class AbstractTimeSeriesTrainer(SimpleAbstractTrainer):
         val_splitter: Optional[AbstractWindowSplitter] = None,
         refit_every_n_windows: Optional[int] = 1,
         cache_predictions: bool = True,
+        ensemble_model_type: Optional[Type] = None,
         **kwargs,
     ):
         super().__init__(path=path, save_data=save_data, low_memory=True, **kwargs)
@@ -276,7 +277,13 @@ class AbstractTimeSeriesTrainer(SimpleAbstractTrainer):
         self.skip_model_selection = skip_model_selection
         # Ensemble cannot be fit if val_scores are not computed
         self.enable_ensemble = enable_ensemble and not skip_model_selection
-        self.ensemble_model_type = TimeSeriesGreedyEnsemble
+        if ensemble_model_type is None:
+            ensemble_model_type = TimeSeriesGreedyEnsemble
+        else:
+            logger.warning(
+                "Using a custom `ensemble_model_type` is experimental functionality that may break in future versions."
+            )
+        self.ensemble_model_type = ensemble_model_type
 
         self.verbosity = verbosity
 
@@ -519,8 +526,12 @@ class AbstractTimeSeriesTrainer(SimpleAbstractTrainer):
             fit_end_time = time.time()
             model.fit_time = model.fit_time or (fit_end_time - fit_start_time)
 
+            if time_limit is not None:
+                time_limit = fit_end_time - fit_start_time
             if val_data is not None and not self.skip_model_selection:
-                model.score_and_cache_oof(val_data, store_val_score=True, store_predict_time=True)
+                model.score_and_cache_oof(
+                    val_data, store_val_score=True, store_predict_time=True, time_limit=time_limit
+                )
 
             self._log_scores_and_times(model.val_score, model.fit_time, model.predict_time)
 
@@ -736,7 +747,8 @@ class AbstractTimeSeriesTrainer(SimpleAbstractTrainer):
             quantile_levels=self.quantile_levels,
             metadata=self.metadata,
         )
-        ensemble.fit_ensemble(model_preds, data_per_window=data_per_window, time_limit=time_limit)
+        with warning_filter():
+            ensemble.fit_ensemble(model_preds, data_per_window=data_per_window, time_limit=time_limit)
         ensemble.fit_time = time.time() - time_start
 
         predict_time = 0
