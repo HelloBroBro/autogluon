@@ -445,7 +445,7 @@ class TabularPredictor(TabularPredictorDeprecatedMixin):
             For precise definitions of the provided presets, see file: `autogluon/tabular/configs/presets_configs.py`.
             Users can specify custom presets by passing in a dictionary of argument values as an element to the list.
 
-            Available Presets: ['best_quality', 'high_quality', 'good_quality', 'medium_quality', 'optimize_for_deployment', 'interpretable', 'ignore_text']
+            Available Presets: ['best_quality', 'high_quality', 'good_quality', 'medium_quality', 'experimental_quality', 'optimize_for_deployment', 'interpretable', 'ignore_text']
 
             It is recommended to only use one `quality` based preset in a given call to `fit()` as they alter many of the same arguments and are not compatible with each-other.
 
@@ -465,6 +465,10 @@ class TabularPredictor(TabularPredictorDeprecatedMixin):
                 medium_quality={'auto_stack': False}
                     Medium predictive accuracy with very fast inference and very fast training time. ~20x faster training than `good_quality`.
                     This is the default preset in AutoGluon, but should generally only be used for quick prototyping, as `good_quality` results in significantly better predictive accuracy and faster inference time.
+
+                experimental_quality={'auto_stack': True, 'dynamic_stacking': 'auto', 'hyperparameters': 'experimental', 'fit_strategy': 'parallel', 'num_gpus': 0}
+                    This preset acts as a testing ground for cutting edge features and models which could later be added to the `best_quality` preset in future releases.
+                    Recommended when `best_quality` was already being used and the user wants to push performance even further.
 
                 optimize_for_deployment={'keep_only_best': True, 'save_space': True}
                     Optimizes result immediately for deployment by deleting unused models and removing training artifacts.
@@ -1060,12 +1064,13 @@ class TabularPredictor(TabularPredictorDeprecatedMixin):
         else:
             logger.log(
                 20,
-                "No presets specified! To achieve strong results with AutoGluon, it is recommended to use the available presets. Defaulting to `'medium_quality'`...\n"
+                "No presets specified! To achieve strong results with AutoGluon, it is recommended to use the available presets. Defaulting to `'medium'`...\n"
                 "\tRecommended Presets (For more details refer to https://auto.gluon.ai/stable/tutorials/tabular/tabular-essentials.html#presets):\n"
-                "\tpresets='best_quality'   : Maximize accuracy. Recommended for most users. Use in competitions and benchmarks. Default time_limit=3600.\n"
-                "\tpresets='high_quality'   : Strong accuracy with fast inference speed. Default time_limit=3600.\n"
-                "\tpresets='good_quality'   : Good accuracy with very fast inference speed. Default time_limit=3600.\n"
-                "\tpresets='medium_quality' : Fast training time, ideal for initial prototyping.",
+                "\tpresets='experimental' : New in v1.2: Pre-trained foundation model + parallel fits. The absolute best accuracy without consideration for inference speed. Does not support GPU.\n"
+                "\tpresets='best'         : Maximize accuracy. Recommended for most users. Use in competitions and benchmarks.\n"
+                "\tpresets='high'         : Strong accuracy with fast inference speed.\n"
+                "\tpresets='good'         : Good accuracy with very fast inference speed.\n"
+                "\tpresets='medium'       : Fast training time, ideal for initial prototyping.",
             )
 
         kwargs_orig = kwargs.copy()
@@ -1729,7 +1734,7 @@ class TabularPredictor(TabularPredictorDeprecatedMixin):
                         f"Disabling decision threshold calibration for metric `accuracy` due to having "
                         f"fewer than {min_val_rows_for_calibration} rows of validation data for calibration, "
                         f"to avoid overfitting ({num_rows_val_for_calibration} rows)."
-                        f"\n\t`accuracy` is generally not improved through threshold calibration "
+                        f"\n\t`accuracy` is generally not improved through threshold calibration. "
                         f"Force calibration via specifying `calibrate_decision_threshold=True`.",
                     )
             elif calibrate_decision_threshold:
@@ -5640,62 +5645,6 @@ class TabularPredictor(TabularPredictorDeprecatedMixin):
             else:
                 error_message = f"{error_message} `.{message_suffix}`."
             raise AssertionError(error_message)
-
-
-# Location to store WIP functionality that will be later added to TabularPredictor
-class _TabularPredictorExperimental(TabularPredictor):
-    # TODO: Documentation, flesh out capabilities
-    # TODO: Rename feature_generator -> feature_pipeline for users?
-    # TODO: Return transformed data?
-    # TODO: feature_generator_kwargs?
-    def fit_feature_generator(self, data: pd.DataFrame, feature_generator="auto", feature_metadata=None):
-        self._set_feature_generator(feature_generator=feature_generator, feature_metadata=feature_metadata)
-        self._learner.fit_transform_features(data)
-
-    # TODO: rename to `advice`
-    # TODO: Add documentation
-    def _advice(self):
-        is_feature_generator_fit = self._learner.feature_generator.is_fit()
-        is_learner_fit = self._learner.trainer_path is not None
-        exists_trainer = self._trainer is not None
-
-        advice_dict = dict(
-            is_feature_generator_fit=is_feature_generator_fit,
-            is_learner_fit=is_learner_fit,
-            exists_trainer=exists_trainer,
-            # TODO
-        )
-
-        advice_list = []
-
-        if not advice_dict["is_feature_generator_fit"]:
-            advice_list.append("FeatureGenerator has not been fit, consider calling `predictor.fit_feature_generator(data)`.")
-        if not advice_dict["is_learner_fit"]:
-            advice_list.append("Learner is not fit, consider calling `predictor.fit(...)`")
-        if not advice_dict["exists_trainer"]:
-            advice_list.append("Trainer is not initialized, consider calling `predictor.fit(...)`")
-        # TODO: Advice on unused features (if no model uses a feature)
-        # TODO: Advice on fit_extra
-        # TODO: Advice on distill
-        # TODO: Advice on leaderboard
-        # TODO: Advice on persist
-        # TODO: Advice on refit_full
-        # TODO: Advice on feature_importance
-        # TODO: Advice on dropping poor models
-
-        logger.log(20, "======================= AutoGluon Advice =======================")
-        if advice_list:
-            for advice in advice_list:
-                logger.log(20, advice)
-        else:
-            logger.log(20, "No further advice found.")
-        logger.log(20, "================================================================")
-
-    @classmethod
-    def from_learner(cls, learner: AbstractTabularLearner):
-        predictor = cls(label=learner.label, path=learner.path)
-        predictor._set_post_fit_vars(learner=learner)
-        return predictor
 
 
 def _dystack(
